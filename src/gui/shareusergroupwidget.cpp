@@ -66,6 +66,7 @@ ShareUserGroupWidget::ShareUserGroupWidget(AccountPtr account,
     setObjectName("SharingDialogUG"); // required as group for saveGeometry call
 
     _ui->setupUi(this);
+    _ui->scrollArea->setVisible(false);
 
     //Is this a file or folder?
     _isFile = QFileInfo(localPath).isFile();
@@ -81,6 +82,11 @@ ShareUserGroupWidget::ShareUserGroupWidget(AccountPtr account,
     _completer->setCaseSensitivity(Qt::CaseInsensitive);
     _completer->setCompletionMode(QCompleter::UnfilteredPopupCompletion);
     _ui->shareeLineEdit->setCompleter(_completer);
+
+    // add share link
+//    _ui->shareeLineEdit->setClearButtonEnabled(true);
+//    QAction *test = new QAction("Click here!");
+//    _ui->shareeLineEdit->addAction(test, QLineEdit::ActionPosition::TrailingPosition);
 
     _manager = new ShareManager(_account, this);
     connect(_manager, &ShareManager::sharesFetched, this, &ShareUserGroupWidget::slotSharesFetched);
@@ -187,7 +193,6 @@ void ShareUserGroupWidget::slotSharesFetched(const QList<QSharedPointer<Share>> 
     auto layout = new QVBoxLayout(newViewPort);
     layout->setMargin(0);
     layout->setSpacing(0);
-    layout->setAlignment(Qt::AlignVCenter);
 
     QSize minimumSize = newViewPort->sizeHint();
     int x = 0;
@@ -212,9 +217,7 @@ void ShareUserGroupWidget::slotSharesFetched(const QList<QSharedPointer<Share>> 
         }
     }
     if (layout->isEmpty()) {
-        QLabel *notSharedYetLabel = new QLabel(tr("The item is not shared with any users or groups"));
-        notSharedYetLabel->setAlignment(Qt::AlignHCenter);
-        layout->addWidget(notSharedYetLabel);
+        _ui->scrollArea->setVisible(false);
     } else {
         layout->addStretch(1);
     }
@@ -310,6 +313,10 @@ void ShareUserGroupWidget::slotCompleterActivated(const QModelIndex &index)
 
     _ui->shareeLineEdit->setEnabled(false);
     _ui->shareeLineEdit->setText(QString());
+    if(!layout->isEmpty())
+        _ui->scrollArea->setVisible(true);
+    else
+        _ui->scrollArea->setVisible(false);
 }
 
 void ShareUserGroupWidget::slotCompleterHighlighted(const QModelIndex &index)

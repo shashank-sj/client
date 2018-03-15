@@ -215,7 +215,7 @@ void ShareDialog::showSharingUi()
     if (theme->linkSharing()) {
         _linkWidget = new ShareLinkWidget(_accountState->account(), _sharePath, _localPath, _maxSharingPermissions, this);
         _linkWidget->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
-        _ui->verticalLayout->addWidget(_linkWidget);
+        _ui->linksVerticalLayout->addWidget(_linkWidget);
         _linkWidget->getShares();
     }
 }
