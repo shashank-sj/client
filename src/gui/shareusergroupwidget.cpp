@@ -108,6 +108,10 @@ ShareUserGroupWidget::ShareUserGroupWidget(AccountPtr account,
 
     // Setup the sharee search progress indicator
     _ui->shareeHorizontalLayout->addWidget(&_pi_sharee);
+
+    // adds permissions
+    _ui->permissionComboBox->addItem(tr("can share"), QVariant(SharePermissionShare));
+    _ui->permissionComboBox->addItem(tr("can edit"), QVariant(SharePermissionUpdate));
 }
 
 ShareUserGroupWidget::~ShareUserGroupWidget()
@@ -301,7 +305,7 @@ void ShareUserGroupWidget::slotCompleterActivated(const QModelIndex &index)
             sharee->shareWith(), SharePermission(permissions));
     } else {
         _manager->createShare(_sharePath, Share::ShareType(sharee->type()),
-            sharee->shareWith(), SharePermissionDefault);
+            sharee->shareWith(), SharePermission(_ui->permissionComboBox->currentData().toInt()));
     }
 
     _ui->shareeLineEdit->setEnabled(false);

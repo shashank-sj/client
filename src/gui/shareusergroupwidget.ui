@@ -44,6 +44,9 @@
        </property>
       </widget>
      </item>
+     <item>
+      <widget class="QComboBox" name="permissionComboBox"/>
+     </item>
     </layout>
    </item>
    <item>
