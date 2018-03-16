@@ -83,11 +83,6 @@ ShareUserGroupWidget::ShareUserGroupWidget(AccountPtr account,
     _completer->setCompletionMode(QCompleter::UnfilteredPopupCompletion);
     _ui->shareeLineEdit->setCompleter(_completer);
 
-    // add share link
-//    _ui->shareeLineEdit->setClearButtonEnabled(true);
-//    QAction *test = new QAction("Click here!");
-//    _ui->shareeLineEdit->addAction(test, QLineEdit::ActionPosition::TrailingPosition);
-
     _manager = new ShareManager(_account, this);
     connect(_manager, &ShareManager::sharesFetched, this, &ShareUserGroupWidget::slotSharesFetched);
     connect(_manager, &ShareManager::shareCreated, this, &ShareUserGroupWidget::getShares);
@@ -116,8 +111,36 @@ ShareUserGroupWidget::ShareUserGroupWidget(AccountPtr account,
     _ui->shareeHorizontalLayout->addWidget(&_pi_sharee);
 
     // adds permissions
-    _ui->permissionComboBox->addItem(tr("can share"), QVariant(SharePermissionShare));
-    _ui->permissionComboBox->addItem(tr("can edit"), QVariant(SharePermissionUpdate));
+    QMenu *menu = new QMenu(this);
+    QAction *canShare = new QAction(tr("can share"));
+    canShare->setCheckable(true);
+    canShare->setEnabled(true);
+    canShare->setData(QVariant(SharePermissionShare));
+    QAction *canEdit = new QAction(tr("can edit"));
+    canEdit->setCheckable(true);
+    canEdit->setEnabled(true);
+    canEdit->setData(QVariant(SharePermissionUpdate));
+
+    menu->addAction(canShare);
+    menu->addAction(canEdit);
+    /*
+     * Files can't have create or delete permissions
+     */
+    if (!_isFile) {
+        QAction *canCreate= new QAction(tr("can create"));
+        canCreate->setCheckable(true);
+        canCreate->setEnabled(true);
+        canCreate->setData(QVariant(SharePermissionCreate));
+        QAction *canDelete = new QAction(tr("can delete"));
+        canDelete->setCheckable(true);
+        canDelete->setEnabled(true);
+        canDelete->setData(QVariant(SharePermissionDelete));
+        menu->addAction(canCreate);
+        menu->addAction(canDelete);
+    }
+    _ui->permissionToolButton->setDefaultAction(canShare);
+    _ui->permissionToolButton->setMenu(menu);
+    _ui->permissionToolButton->setPopupMode(QToolButton::InstantPopup);
 }
 
 ShareUserGroupWidget::~ShareUserGroupWidget()
@@ -187,54 +210,56 @@ void ShareUserGroupWidget::getShares()
 
 void ShareUserGroupWidget::slotSharesFetched(const QList<QSharedPointer<Share>> &shares)
 {
-    QScrollArea *scrollArea = _ui->scrollArea;
+    if(shares.size() > 0){
+        QScrollArea *scrollArea = _ui->scrollArea;
 
-    auto newViewPort = new QWidget(scrollArea);
-    auto layout = new QVBoxLayout(newViewPort);
-    layout->setMargin(0);
-    layout->setSpacing(0);
+        auto newViewPort = new QWidget(scrollArea);
+        auto layout = new QVBoxLayout(newViewPort);
+        layout->setMargin(0);
+        layout->setSpacing(0);
 
-    QSize minimumSize = newViewPort->sizeHint();
-    int x = 0;
+        QSize minimumSize = newViewPort->sizeHint();
+        int x = 0;
 
-    foreach (const auto &share, shares) {
-        // We don't handle link shares
-        if (share->getShareType() == Share::TypeLink) {
-            continue;
+        foreach (const auto &share, shares) {
+            // We don't handle link shares
+            if (share->getShareType() == Share::TypeLink) {
+                continue;
+            }
+
+            ShareUserLine *s = new ShareUserLine(share, _maxSharingPermissions, _isFile, _ui->scrollArea);
+            connect(s, &ShareUserLine::resizeRequested, this, &ShareUserGroupWidget::slotAdjustScrollWidgetSize);
+            connect(s, &ShareUserLine::visualDeletionDone, this, &ShareUserGroupWidget::getShares);
+            s->setBackgroundRole(layout->count() % 2 == 0 ? QPalette::Base : QPalette::AlternateBase);
+            layout->addWidget(s);
+
+            x++;
+            if (x <= 3) {
+                minimumSize = newViewPort->sizeHint();
+            } else {
+                minimumSize.rwidth() = qMax(newViewPort->sizeHint().width(), minimumSize.width());
+            }
         }
 
-        ShareUserLine *s = new ShareUserLine(share, _maxSharingPermissions, _isFile, _ui->scrollArea);
-        connect(s, &ShareUserLine::resizeRequested, this, &ShareUserGroupWidget::slotAdjustScrollWidgetSize);
-        connect(s, &ShareUserLine::visualDeletionDone, this, &ShareUserGroupWidget::getShares);
-        s->setBackgroundRole(layout->count() % 2 == 0 ? QPalette::Base : QPalette::AlternateBase);
-        layout->addWidget(s);
+        minimumSize.rwidth() += layout->spacing();
+        minimumSize.rheight() += layout->spacing();
+        scrollArea->setMinimumSize(minimumSize);
+        scrollArea->setWidget(newViewPort);
 
-        x++;
-        if (x <= 3) {
-            minimumSize = newViewPort->sizeHint();
-        } else {
-            minimumSize.rwidth() = qMax(newViewPort->sizeHint().width(), minimumSize.width());
-        }
-    }
-    if (layout->isEmpty()) {
-        _ui->scrollArea->setVisible(false);
+        _disableCompleterActivated = false;
+        _ui->shareeLineEdit->setEnabled(true);
+        _ui->scrollArea->setVisible(true);
+
     } else {
-        layout->addStretch(1);
+        _ui->scrollArea->setVisible(false);
     }
-
-    minimumSize.rwidth() += layout->spacing();
-    minimumSize.rheight() += layout->spacing();
-    scrollArea->setMinimumSize(minimumSize);
-    scrollArea->setWidget(newViewPort);
-
-    _disableCompleterActivated = false;
-    _ui->shareeLineEdit->setEnabled(true);
 }
 
 void ShareUserGroupWidget::slotAdjustScrollWidgetSize()
 {
     QScrollArea *scrollArea = _ui->scrollArea;
-    if (scrollArea->findChildren<ShareUserLine *>().count() <= 3) {
+    if (scrollArea->findChildren<ShareUserLine *>().count() <= 3 &&
+            scrollArea->findChildren<ShareUserLine *>().count() > 0) {
         auto minimumSize = scrollArea->widget()->sizeHint();
         auto spacing = scrollArea->widget()->layout()->spacing();
         minimumSize.rwidth() += spacing;
@@ -276,6 +301,7 @@ void ShareUserGroupWidget::slotCompleterActivated(const QModelIndex &index)
     // model proxying the _completerModel
     auto sharee = qvariant_cast<QSharedPointer<Sharee>>(index.data(Qt::UserRole));
     if (sharee.isNull()) {
+        _ui->scrollArea->setVisible(false);
         return;
     }
 
@@ -284,14 +310,14 @@ void ShareUserGroupWidget::slotCompleterActivated(const QModelIndex &index)
      */
     auto viewPort = _ui->scrollArea->widget();
     auto layout = qobject_cast<QVBoxLayout *>(viewPort->layout());
-    auto indicator = new QProgressIndicator(viewPort);
-    indicator->startAnimation();
-    if (layout->count() == 1) {
-        // No shares yet! Remove the label, add some stretch.
-        delete layout->itemAt(0)->widget();
-        layout->addStretch(1);
-    }
-    layout->insertWidget(layout->count() - 1, indicator);
+//    auto indicator = new QProgressIndicator(viewPort);
+//    indicator->startAnimation();
+//    if (layout->count() == 1) {
+//        // No shares yet! Remove the label, add some stretch.
+//        delete layout->itemAt(0)->widget();
+//        layout->addStretch(1);
+//    }
+//    layout->insertWidget(layout->count() - 1, indicator);
 
     /*
      * Don't send the reshare permissions for federated shares for servers <9.1
@@ -307,16 +333,22 @@ void ShareUserGroupWidget::slotCompleterActivated(const QModelIndex &index)
         _manager->createShare(_sharePath, Share::ShareType(sharee->type()),
             sharee->shareWith(), SharePermission(permissions));
     } else {
+        int permissions = SharePermissionRead;
+        foreach (QAction *permission, _ui->permissionToolButton->menu()->actions()) {
+            if(permission->isChecked())
+                permissions |= permission->data().toInt();
+        }
         _manager->createShare(_sharePath, Share::ShareType(sharee->type()),
-            sharee->shareWith(), SharePermission(_ui->permissionComboBox->currentData().toInt()));
+            sharee->shareWith(), SharePermission(permissions));
     }
 
     _ui->shareeLineEdit->setEnabled(false);
     _ui->shareeLineEdit->setText(QString());
-    if(!layout->isEmpty())
-        _ui->scrollArea->setVisible(true);
-    else
+
+    if(layout->isEmpty())
         _ui->scrollArea->setVisible(false);
+    else
+        _ui->scrollArea->setVisible(true);
 }
 
 void ShareUserGroupWidget::slotCompleterHighlighted(const QModelIndex &index)
