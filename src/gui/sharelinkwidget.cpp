@@ -111,6 +111,7 @@ ShareLinkWidget::ShareLinkWidget(AccountPtr account,
     }
 
     _ui->shareProperties->setEnabled(false);
+    _ui->shareProperties->setVisible(false);
 
     _ui->pushButton_setPassword->setEnabled(false);
     _ui->lineEdit_password->setEnabled(false);
@@ -286,6 +287,7 @@ void ShareLinkWidget::slotShareSelectionChanged()
     auto share = selectedShare();
     if (!share) {
         _ui->shareProperties->setEnabled(false);
+        _ui->shareProperties->setVisible(false);
         //_ui->radio_readOnly->setChecked(false);
         //_ui->radio_readWrite->setChecked(false);
         //_ui->radio_uploadOnly->setChecked(false);
@@ -295,6 +297,7 @@ void ShareLinkWidget::slotShareSelectionChanged()
     }
 
     _ui->shareProperties->setEnabled(true);
+    _ui->shareProperties->setVisible(true);
 
     _ui->checkBox_password->setEnabled(!_passwordRequired);
     _ui->checkBox_expire->setEnabled(!_expiryRequired);
@@ -468,6 +471,7 @@ void ShareLinkWidget::slotCreateShareRequiresPassword(const QString &message)
     _pi_create->stopAnimation();
     _pi_password->stopAnimation();
     _ui->shareProperties->setEnabled(true);
+    _ui->shareProperties->setVisible(true);
     _ui->checkBox_password->setChecked(true);
     _ui->checkBox_password->setEnabled(false);
     _ui->checkBox_password->setText(tr("Public sh&aring requires a password"));
