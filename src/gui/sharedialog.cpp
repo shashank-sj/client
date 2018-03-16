@@ -122,10 +122,10 @@ ShareDialog::ShareDialog(QPointer<AccountState> accountState,
         job->start();
     }
 
-    _progressIndicator = new QProgressIndicator(this);
-    _progressIndicator->startAnimation();
-    _progressIndicator->setToolTip(tr("Retrieving maximum possible sharing permissions from server..."));
-    _ui->buttonBoxLayout->insertWidget(0, _progressIndicator);
+//    _progressIndicator = new QProgressIndicator(this);
+//    _progressIndicator->startAnimation();
+//    _progressIndicator->setToolTip(tr("Retrieving maximum possible sharing permissions from server..."));
+//    _ui->buttonBoxLayout->insertWidget(0, _progressIndicator);
 
     // Server versions >= 9.1 support the "share-permissions" property
     // older versions will just return share-permissions: ""
@@ -184,7 +184,7 @@ void ShareDialog::slotPropfindError()
 
 void ShareDialog::showSharingUi()
 {
-    _progressIndicator->stopAnimation();
+    //_progressIndicator->stopAnimation();
 
     auto theme = Theme::instance();
 
@@ -208,14 +208,14 @@ void ShareDialog::showSharingUi()
 
     if (userGroupSharing) {
         _userGroupWidget = new ShareUserGroupWidget(_accountState->account(), _sharePath, _localPath, _maxSharingPermissions, _privateLinkUrl, this);
-        _ui->verticalLayout->addWidget(_userGroupWidget);
+        _ui->shareUserVerticalLayout->addWidget(_userGroupWidget);
         _userGroupWidget->getShares();
     }
 
     if (theme->linkSharing()) {
         _linkWidget = new ShareLinkWidget(_accountState->account(), _sharePath, _localPath, _maxSharingPermissions, this);
-        _linkWidget->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
-        _ui->linksVerticalLayout->addWidget(_linkWidget);
+        //_linkWidget->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Preferred);
+        _ui->shareLinkVerticalLayout->addWidget(_linkWidget);
         _linkWidget->getShares();
     }
 }
