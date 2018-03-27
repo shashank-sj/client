@@ -89,7 +89,6 @@ private:
     QHash<Account *, QAction *> _actionForAccount;
 
     QToolBar *_toolBar;
-
     QMap<AccountStatePtr, ActivitySettings *> _activitySettings;
 
     ownCloudGui *_gui;
