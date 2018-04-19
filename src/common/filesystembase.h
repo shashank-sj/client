@@ -110,6 +110,11 @@ namespace FileSystem {
     bool OCSYNC_EXPORT remove(const QString &fileName, QString *errorString = 0);
 
     /**
+     * Move the specified file or folder to the trash. (Only implemented on linux)
+     */
+    bool OCSYNC_EXPORT moveToTrash(const QString &filename, QString *errorString);
+
+    /**
      * Replacement for QFile::open(ReadOnly) followed by a seek().
      * This version sets a more permissive sharing mode on Windows.
      *
@@ -136,7 +141,15 @@ namespace FileSystem {
      */
     bool OCSYNC_EXPORT isFileLocked(const QString &fileName);
 
+    /**
+     * Returns whether the file is a shortcut file (ends with .lnk)
+     */
     bool OCSYNC_EXPORT isLnkFile(const QString &filename);
+
+    /**
+     * Returns whether the file is a junction (windows only)
+     */
+    bool OCSYNC_EXPORT isJunction(const QString &filename);
 
     /*
      * This function takes a path and converts it to a UNC representation of the

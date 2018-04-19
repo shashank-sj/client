@@ -139,9 +139,9 @@ public:
         return _errorString.isEmpty() ? AbstractNetworkJob::errorString() : _errorString;
     }
 
-    quint64 msSinceStart() const
+    std::chrono::milliseconds msSinceStart() const
     {
-        return _requestTimer.elapsed();
+        return std::chrono::milliseconds(_requestTimer.elapsed());
     }
 
 signals:
@@ -257,6 +257,8 @@ private slots:
     void slotPollFinished();
 
 protected:
+    void done(SyncFileItem::Status status, const QString &errorString = QString()) override;
+
     /**
      * Prepares the abort e.g. connects proper signals and slots
      * to the subjobs to abort asynchronously

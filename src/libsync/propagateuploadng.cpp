@@ -83,7 +83,7 @@ void PropagateUploadFileNG::doStartUpload()
     propagator()->_activeJobList.append(this);
 
     const SyncJournalDb::UploadInfo progressInfo = propagator()->_journal->getUploadInfo(_item->_file);
-    if (progressInfo._valid && progressInfo._modtime == _item->_modtime) {
+    if (progressInfo._valid && progressInfo.isChunked() && progressInfo._modtime == _item->_modtime) {
         _transferId = progressInfo._transferid;
         auto url = chunkUrl();
         auto job = new LsColJob(propagator()->account(), url, this);
@@ -98,7 +98,7 @@ void PropagateUploadFileNG::doStartUpload()
             this, &PropagateUploadFileNG::slotPropfindIterate);
         job->start();
         return;
-    } else if (progressInfo._valid) {
+    } else if (progressInfo._valid && progressInfo.isChunked()) {
         // The upload info is stale. remove the stale chunks on the server
         _transferId = progressInfo._transferid;
         // Fire and forget. Any error will be ignored.
@@ -143,6 +143,12 @@ void PropagateUploadFileNG::slotPropfindFinished()
         qCCritical(lcPropagateUpload) << "Inconsistency while resuming " << _item->_file
                                       << ": the size on the server (" << _sent << ") is bigger than the size of the file ("
                                       << _item->_size << ")";
+
+        // Wipe the old chunking data.
+        // Fire and forget. Any error will be ignored.
+        (new DeleteJob(propagator()->account(), chunkUrl(), this))->start();
+
+        propagator()->_activeJobList.append(this);
         startNewUpload();
         return;
     }
@@ -274,6 +280,7 @@ void PropagateUploadFileNG::startNextChunk()
     if (_currentChunkSize == 0) {
         Q_ASSERT(_jobs.isEmpty()); // There should be no running job anymore
         _finished = true;
+
         // Finish with a MOVE
         QString destination = QDir::cleanPath(propagator()->account()->url().path() + QLatin1Char('/')
             + propagator()->account()->davPath() + propagator()->_remoteFolder + _item->_file);
@@ -364,12 +371,10 @@ void PropagateUploadFileNG::slotPutFinished()
     //
     // Dynamic chunk sizing is enabled if the server configured a
     // target duration for each chunk upload.
-    double targetDuration = propagator()->syncOptions()._targetChunkUploadDuration;
-    if (targetDuration > 0) {
-        double uploadTime = job->msSinceStart() + 1; // add one to avoid div-by-zero
-
-        auto predictedGoodSize = static_cast<quint64>(
-            _currentChunkSize / uploadTime * targetDuration);
+    auto targetDuration = propagator()->syncOptions()._targetChunkUploadDuration;
+    if (targetDuration.count() > 0) {
+        auto uploadTime = ++job->msSinceStart(); // add one to avoid div-by-zero
+        qint64 predictedGoodSize = (_currentChunkSize * targetDuration) / uploadTime;
 
         // The whole targeting is heuristic. The predictedGoodSize will fluctuate
         // quite a bit because of external factors (like available bandwidth)
@@ -385,18 +390,18 @@ void PropagateUploadFileNG::slotPutFinished()
             targetSize,
             propagator()->syncOptions()._maxChunkSize);
 
-        qCInfo(lcPropagateUpload) << "Chunked upload of" << _currentChunkSize << "bytes took" << uploadTime
-                                  << "ms, desired is" << targetDuration << "ms, expected good chunk size is"
+        qCInfo(lcPropagateUpload) << "Chunked upload of" << _currentChunkSize << "bytes took" << uploadTime.count()
+                                  << "ms, desired is" << targetDuration.count() << "ms, expected good chunk size is"
                                   << predictedGoodSize << "bytes and nudged next chunk size to "
                                   << propagator()->_chunkSize << "bytes";
     }
 
-    bool finished = _sent == _item->_size;
+    _finished = _sent == _item->_size;
 
     // Check if the file still exists
     const QString fullFilePath(propagator()->getFilePath(_item->_file));
     if (!FileSystem::fileExists(fullFilePath)) {
-        if (!finished) {
+        if (!_finished) {
             abortWithError(SyncFileItem::SoftError, tr("The local file was removed during sync."));
             return;
         } else {
@@ -407,13 +412,13 @@ void PropagateUploadFileNG::slotPutFinished()
     // Check whether the file changed since discovery.
     if (!FileSystem::verifyFileUnchanged(fullFilePath, _item->_size, _item->_modtime)) {
         propagator()->_anotherSyncNeeded = true;
-        if (!finished) {
+        if (!_finished) {
             abortWithError(SyncFileItem::SoftError, tr("Local file changed during sync."));
             return;
         }
     }
 
-    if (!finished) {
+    if (!_finished) {
         // Deletes an existing blacklist entry on successful chunk upload
         if (_item->_hasBlacklistEntry) {
             propagator()->_journal->wipeErrorBlacklistEntry(_item->_file);

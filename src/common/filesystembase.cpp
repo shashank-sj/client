@@ -19,8 +19,11 @@
 #include "filesystembase.h"
 
 #include <QDateTime>
+#include <QDir>
+#include <QUrl>
 #include <QFile>
 #include <QCryptographicHash>
+#include <QCoreApplication>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -422,6 +425,83 @@ bool FileSystem::remove(const QString &fileName, QString *errorString)
     return true;
 }
 
+bool FileSystem::moveToTrash(const QString &fileName, QString *errorString)
+{
+#if defined Q_OS_UNIX && !defined Q_OS_MAC
+    QString trashPath, trashFilePath, trashInfoPath;
+    QString xdgDataHome = QFile::decodeName(qgetenv("XDG_DATA_HOME"));
+    if (xdgDataHome.isEmpty()) {
+        trashPath = QDir::homePath() + "/.local/share/Trash/"; // trash path that should exist
+    } else {
+        trashPath = xdgDataHome + "/Trash/";
+    }
+
+    trashFilePath = trashPath + "files/"; // trash file path contain delete files
+    trashInfoPath = trashPath + "info/"; // trash info path contain delete files information
+
+    if (!(QDir().mkpath(trashFilePath) && QDir().mkpath(trashInfoPath))) {
+        *errorString = QCoreApplication::translate("FileSystem", "Could not make directories in trash");
+        return false; //mkpath will return true if path exists
+    }
+
+    QFileInfo f(fileName);
+
+    QDir file;
+    int suffix_number = 1;
+    if (file.exists(trashFilePath + f.fileName())) { //file in trash already exists, move to "filename.1"
+        QString path = trashFilePath + f.fileName() + ".";
+        while (file.exists(path + QString::number(suffix_number))) { //or to "filename.2" if "filename.1" exists, etc
+            suffix_number++;
+        }
+        if (!file.rename(f.absoluteFilePath(), path + QString::number(suffix_number))) { // rename(file old path, file trash path)
+            *errorString = QCoreApplication::translate("FileSystem", "Could not move '%1' to '%2'")
+                               .arg(f.absoluteFilePath(), path + QString::number(suffix_number));
+            return false;
+        }
+    } else {
+        if (!file.rename(f.absoluteFilePath(), trashFilePath + f.fileName())) { // rename(file old path, file trash path)
+            *errorString = QCoreApplication::translate("FileSystem", "Could not move '%1' to '%2'")
+                               .arg(f.absoluteFilePath(), trashFilePath + f.fileName());
+            return false;
+        }
+    }
+
+    // create file format for trash info file----- START
+    QFile infoFile;
+    if (file.exists(trashInfoPath + f.fileName() + ".trashinfo")) { //TrashInfo file already exists, create "filename.1.trashinfo"
+        QString filename = trashInfoPath + f.fileName() + "." + QString::number(suffix_number) + ".trashinfo";
+        infoFile.setFileName(filename); //filename+.trashinfo //  create file information file in /.local/share/Trash/info/ folder
+    } else {
+        QString filename = trashInfoPath + f.fileName() + ".trashinfo";
+        infoFile.setFileName(filename); //filename+.trashinfo //  create file information file in /.local/share/Trash/info/ folder
+    }
+
+    infoFile.open(QIODevice::ReadWrite);
+
+    QTextStream stream(&infoFile); // for write data on open file
+
+    QByteArray info = "[Trash Info]\n";
+    info += "Path=";
+    info += QUrl::toPercentEncoding(f.absoluteFilePath(), "~_-./");
+    info += '\n';
+    info += "DeletionDate=";
+    info += QDateTime::currentDateTime().toString(Qt::ISODate).toLatin1();
+    info += '\n';
+
+    stream << info;
+
+    infoFile.close();
+
+    // create info file format of trash file----- END
+
+    return true;
+#else
+    Q_UNUSED(fileName)
+    *errorString = QCoreApplication::translate("FileSystem", "Moving to the trash is not implemented on this platform");
+    return false;
+#endif
+}
+
 bool FileSystem::isFileLocked(const QString &fileName)
 {
 #ifdef Q_OS_WIN
@@ -455,6 +535,24 @@ bool FileSystem::isFileLocked(const QString &fileName)
 bool FileSystem::isLnkFile(const QString &filename)
 {
     return filename.endsWith(".lnk");
+}
+
+bool FileSystem::isJunction(const QString &filename)
+{
+#ifdef Q_OS_WIN
+    WIN32_FIND_DATA findData;
+    HANDLE hFind = FindFirstFileEx((const wchar_t *)filename.utf16(), FindExInfoBasic, &findData, FindExSearchNameMatch, NULL, 0);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+        return false;
+    }
+    return findData.dwFileAttributes != INVALID_FILE_ATTRIBUTES
+        && findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT
+        && findData.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
+#else
+    Q_UNUSED(filename);
+    return false;
+#endif
 }
 
 } // namespace OCC

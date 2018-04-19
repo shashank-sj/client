@@ -47,6 +47,7 @@
 #include "common/asserts.h"
 
 #include <QtCore/QTextCodec>
+#include <QtCore/QFile>
 
 // Needed for PRIu64 on MinGW in C++ mode.
 #define __STDC_FORMAT_MACROS
@@ -108,15 +109,9 @@ static bool _csync_mtime_equal(time_t a, time_t b)
  * See doc/dev/sync-algorithm.md for an overview.
  */
 static int _csync_detect_update(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> fs) {
+  Q_ASSERT(fs);
   OCC::SyncJournalFileRecord base;
   CSYNC_EXCLUDE_TYPE excluded = CSYNC_NOT_EXCLUDED;
-
-  if (fs == NULL) {
-    errno = EINVAL;
-    ctx->status_code = CSYNC_STATUS_PARAM_ERROR;
-    return -1;
-  }
-
   if (fs->type == ItemTypeSkip) {
       excluded =CSYNC_FILE_EXCLUDE_STAT_FAILED;
   } else {
@@ -192,19 +187,64 @@ static int _csync_detect_update(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> f
       return -1;
   }
 
+  // The db entry might be for a placeholder, so look for that on the
+  // remote side. If we find one, change the current fs to look like a
+  // placeholder too, because that's what one would see if the remote
+  // db was filled from the database.
+  if (ctx->current == REMOTE_REPLICA && !base.isValid() && fs->type == ItemTypeFile) {
+      auto placeholderPath = fs->path;
+      placeholderPath.append(ctx->placeholder_suffix);
+      ctx->statedb->getFileRecord(placeholderPath, &base);
+      if (base.isValid() && base._type == ItemTypePlaceholder) {
+          fs->type = ItemTypePlaceholder;
+          fs->path = placeholderPath;
+      } else {
+          base = OCC::SyncJournalFileRecord();
+      }
+  }
+
   if(base.isValid()) { /* there is an entry in the database */
       /* we have an update! */
       qCInfo(lcUpdate, "Database entry found, compare: %" PRId64 " <-> %" PRId64
                                           ", etag: %s <-> %s, inode: %" PRId64 " <-> %" PRId64
-                                          ", size: %" PRId64 " <-> %" PRId64 ", perms: %x <-> %x, ignore: %d",
+                                          ", size: %" PRId64 " <-> %" PRId64
+                                          ", perms: %x <-> %x"
+                                          ", type: %d <-> %d"
+                                          ", checksum: %s <-> %s"
+                                          ", ignore: %d",
                 ((int64_t) fs->modtime), ((int64_t) base._modtime),
                 fs->etag.constData(), base._etag.constData(), (uint64_t) fs->inode, (uint64_t) base._inode,
-                (uint64_t) fs->size, (uint64_t) base._fileSize, *reinterpret_cast<short*>(&fs->remotePerm), *reinterpret_cast<short*>(&base._remotePerm), base._serverHasIgnoredFiles );
+                (uint64_t) fs->size, (uint64_t) base._fileSize,
+                *reinterpret_cast<short*>(&fs->remotePerm), *reinterpret_cast<short*>(&base._remotePerm),
+                fs->type, base._type,
+                fs->checksumHeader.constData(), base._checksumHeader.constData(),
+                base._serverHasIgnoredFiles );
+
+      // If the db suggests a placeholder should be downloaded,
+      // treat the file as new on the remote.
+      if (ctx->current == REMOTE_REPLICA && base._type == ItemTypePlaceholderDownload) {
+          fs->instruction = CSYNC_INSTRUCTION_NEW;
+          fs->type = ItemTypePlaceholderDownload;
+          goto out;
+      }
+
+      // If what the db thinks is a placeholder is actually a file/dir,
+      // treat it as new locally.
+      if (ctx->current == LOCAL_REPLICA
+          && (base._type == ItemTypePlaceholder || base._type == ItemTypePlaceholderDownload)
+          && fs->type != ItemTypePlaceholder) {
+          fs->instruction = CSYNC_INSTRUCTION_EVAL;
+          goto out;
+      }
+
       if (ctx->current == REMOTE_REPLICA && fs->etag != base._etag) {
           fs->instruction = CSYNC_INSTRUCTION_EVAL;
 
-          // Preserve the EVAL flag later on if the type has changed.
-          if (base._type != fs->type) {
+          if (fs->type == ItemTypePlaceholder) {
+              // If the local thing is a placeholder, we just update the metadata
+              fs->instruction = CSYNC_INSTRUCTION_UPDATE_METADATA;
+          } else if (base._type != fs->type) {
+              // Preserve the EVAL flag later on if the type has changed.
               fs->child_modified = true;
           }
 
@@ -325,10 +365,19 @@ static int _csync_detect_update(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> f
               if (!base.isValid())
                   return;
 
+              if (base._type == ItemTypePlaceholderDownload) {
+                  // Remote rename of a placeholder file we have locally scheduled
+                  // for download. We just consider this NEW but mark it for download.
+                  fs->type = ItemTypePlaceholderDownload;
+                  done = true;
+                  return;
+              }
+
               // Some things prohibit rename detection entirely.
               // Since we don't do the same checks again in reconcile, we can't
               // just skip the candidate, but have to give up completely.
-              if (base._type != fs->type) {
+              if (base._type != fs->type
+                  && base._type != ItemTypePlaceholder) {
                   qCWarning(lcUpdate, "file types different, not a rename");
                   done = true;
                   return;
@@ -338,6 +387,14 @@ static int _csync_detect_update(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> f
                   qCWarning(lcUpdate, "file etag different, not a rename");
                   done = true;
                   return;
+              }
+
+              // Now we know there is a sane rename candidate.
+
+              // Rename of a placeholder
+              if (base._type == ItemTypePlaceholder && fs->type == ItemTypeFile) {
+                  fs->type = ItemTypePlaceholder;
+                  fs->path.append(ctx->placeholder_suffix);
               }
 
               // Record directory renames
@@ -369,6 +426,15 @@ static int _csync_detect_update(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> f
                   return 1;
               }
           }
+
+          // Turn new remote files into placeholders if the option is enabled.
+          if (ctx->new_files_are_placeholders
+              && fs->instruction == CSYNC_INSTRUCTION_NEW
+              && fs->type == ItemTypeFile) {
+              fs->type = ItemTypePlaceholder;
+              fs->path.append(ctx->placeholder_suffix);
+          }
+
           goto out;
       }
   }
@@ -471,7 +537,7 @@ int csync_walker(CSYNC *ctx, std::unique_ptr<csync_file_stat_t> fs) {
   return rc;
 }
 
-static bool fill_tree_from_db(CSYNC *ctx, const char *uri)
+static bool fill_tree_from_db(CSYNC *ctx, const char *uri, bool singleFile = false)
 {
     int64_t count = 0;
     QByteArray skipbase;
@@ -526,9 +592,19 @@ static bool fill_tree_from_db(CSYNC *ctx, const char *uri)
         ++count;
     };
 
-    if (!ctx->statedb->getFilesBelowPath(uri, rowCallback)) {
-        ctx->status_code = CSYNC_STATUS_STATEDB_LOAD_ERROR;
-        return false;
+    if (singleFile) {
+        OCC::SyncJournalFileRecord record;
+        if (ctx->statedb->getFileRecord(QByteArray(uri), &record) && record.isValid()) {
+            rowCallback(record);
+        } else {
+            ctx->status_code = CSYNC_STATUS_STATEDB_LOAD_ERROR;
+            return false;
+        }
+    } else {
+        if (!ctx->statedb->getFilesBelowPath(uri, rowCallback)) {
+            ctx->status_code = CSYNC_STATUS_STATEDB_LOAD_ERROR;
+            return false;
+        }
     }
     qInfo(lcUpdate, "%" PRId64 " entries read below path %s from db.", count, uri);
 
@@ -569,23 +645,12 @@ int csync_ftw(CSYNC *ctx, const char *uri, csync_walker_fn fn,
   bool do_read_from_db = (ctx->current == REMOTE_REPLICA && ctx->remote.read_from_db);
   const char *db_uri = uri;
 
-  if (ctx->current == LOCAL_REPLICA
-      && ctx->local_discovery_style == LocalDiscoveryStyle::DatabaseAndFilesystem) {
+  if (ctx->current == LOCAL_REPLICA && ctx->should_discover_locally_fn) {
       const char *local_uri = uri + strlen(ctx->local.uri);
       if (*local_uri == '/')
           ++local_uri;
       db_uri = local_uri;
-      do_read_from_db = true;
-
-      // Minor bug: local_uri doesn't have a trailing /. Example: Assume it's "d/foo"
-      // and we want to check whether we should read from the db. Assume "d/foo a" is
-      // in locally_touched_dirs. Then this check will say no, don't read from the db!
-      // (because "d/foo" < "d/foo a" < "d/foo/bar")
-      // C++14: Could skip the conversion to QByteArray here.
-      auto it = ctx->locally_touched_dirs.lower_bound(QByteArray(local_uri));
-      if (it != ctx->locally_touched_dirs.end() && it->startsWith(local_uri)) {
-          do_read_from_db = false;
-      }
+      do_read_from_db = !ctx->should_discover_locally_fn(QByteArray(local_uri));
   }
 
   if (!depth) {
@@ -676,6 +741,21 @@ int csync_ftw(CSYNC *ctx, const char *uri, csync_walker_fn fn,
         fullpath = QByteArray() % uri % '/' % filename;
     }
 
+    // When encountering placeholder files, read the relevant
+    // entry from the db instead.
+    if (ctx->current == LOCAL_REPLICA
+        && dirent->type == ItemTypeFile
+        && filename.endsWith(ctx->placeholder_suffix)) {
+        QByteArray db_uri = fullpath.mid(strlen(ctx->local.uri) + 1);
+
+        if( ! fill_tree_from_db(ctx, db_uri.constData(), true) ) {
+            qCWarning(lcUpdate) << "Placeholder without db entry for" << filename;
+            QFile::remove(fullpath);
+        }
+
+        continue;
+    }
+
     /* if the filename starts with a . we consider it a hidden file
      * For windows, the hidden state is also discovered within the vio
      * local stat function.
@@ -689,10 +769,7 @@ int csync_ftw(CSYNC *ctx, const char *uri, csync_walker_fn fn,
     // Now process to have a relative path to the sync root for the local replica, or to the data root on the remote.
     dirent->path = fullpath;
     if (ctx->current == LOCAL_REPLICA) {
-        if (dirent->path.size() <= (int)strlen(ctx->local.uri)) {
-            ctx->status_code = CSYNC_STATUS_PARAM_ERROR;
-            goto error;
-        }
+        ASSERT(dirent->path.startsWith(ctx->local.uri)); // path is relative to uri
         // "len + 1" to include the slash in-between.
         dirent->path = dirent->path.mid(strlen(ctx->local.uri) + 1);
     }

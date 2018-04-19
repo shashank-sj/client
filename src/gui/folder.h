@@ -20,7 +20,6 @@
 #include "syncresult.h"
 #include "progressdispatcher.h"
 #include "common/syncjournaldb.h"
-#include "clientproxy.h"
 #include "networkjobs.h"
 
 #include <csync.h>
@@ -29,6 +28,7 @@
 #include <QStringList>
 #include <QUuid>
 #include <set>
+#include <chrono>
 
 class QThread;
 class QSettings;
@@ -39,6 +39,7 @@ class SyncEngine;
 class AccountState;
 class SyncRunFileLog;
 class FolderWatcher;
+class LocalDiscoveryTracker;
 
 /**
  * @brief The FolderDefinition class
@@ -65,6 +66,8 @@ public:
     bool paused;
     /// whether the folder syncs hidden files
     bool ignoreHiddenFiles;
+    /// New files are downloaded as placeholders
+    bool usePlaceholders = false;
     /// The CLSID where this folder appears in registry for the Explorer navigation pane entry.
     QUuid navigationPaneClsid;
 
@@ -192,8 +195,8 @@ public:
     SyncEngine &syncEngine() { return *_engine; }
 
     RequestEtagJob *etagJob() { return _requestEtagJob; }
-    qint64 msecSinceLastSync() const { return _timeSinceLastSyncDone.elapsed(); }
-    qint64 msecLastSyncDuration() const { return _lastSyncDuration; }
+    std::chrono::milliseconds msecSinceLastSync() const { return std::chrono::milliseconds(_timeSinceLastSyncDone.elapsed()); }
+    std::chrono::milliseconds msecLastSyncDuration() const { return _lastSyncDuration; }
     int consecutiveFollowUpSyncs() const { return _consecutiveFollowUpSyncs; }
     int consecutiveFailingSyncs() const { return _consecutiveFailingSyncs; }
 
@@ -282,6 +285,12 @@ public slots:
        */
     void slotWatchedPathChanged(const QString &path);
 
+    /**
+     * Mark a placeholder as being ready for download, and start a sync.
+     * relativePath is the patch to the placeholder file (includeing the extension)
+     */
+    void downloadPlaceholder(const QString &relativepath);
+
 private slots:
     void slotSyncStarted();
     void slotSyncFinished(bool);
@@ -312,6 +321,16 @@ private slots:
 
     /** Ensures that the next sync performs a full local discovery. */
     void slotNextSyncFullLocalDiscovery();
+
+    /** Adjust sync result based on conflict data from IssuesWidget.
+     *
+     * This is pretty awkward, but IssuesWidget just keeps better track
+     * of conflicts across partial local discovery.
+     */
+    void slotFolderConflicts(const QString &folder, const QStringList &conflictPaths);
+
+    /** Warn users if they create a file or folder that is selective-sync excluded */
+    void warnOnNewExcludedItem(const SyncJournalFileRecord &record, const QStringRef &path);
 
 private:
     bool reloadExcludes();
@@ -347,7 +366,7 @@ private:
     QElapsedTimer _timeSinceLastSyncDone;
     QElapsedTimer _timeSinceLastSyncStart;
     QElapsedTimer _timeSinceLastFullLocalDiscovery;
-    qint64 _lastSyncDuration;
+    std::chrono::milliseconds _lastSyncDuration;
 
     /// The number of syncs that failed in a row.
     /// Reset when a sync is successful.
@@ -358,8 +377,6 @@ private:
     int _consecutiveFollowUpSyncs;
 
     SyncJournalDb _journal;
-
-    ClientProxy _clientProxy;
 
     QScopedPointer<SyncRunFileLog> _fileLog;
 
@@ -383,20 +400,9 @@ private:
     QScopedPointer<FolderWatcher> _folderWatcher;
 
     /**
-     * The paths that should be checked by the next local discovery.
-     *
-     * Mostly a collection of files the filewatchers have reported as touched.
-     * Also includes files that have had errors in the last sync run.
+     * Keeps track of locally dirty files so we can skip local discovery sometimes.
      */
-    std::set<QByteArray> _localDiscoveryPaths;
-
-    /**
-     * The paths that the current sync run used for local discovery.
-     *
-     * For failing syncs, this list will be merged into _localDiscoveryPaths
-     * again when the sync is done to make sure everything is retried.
-     */
-    std::set<QByteArray> _previousLocalDiscoveryPaths;
+    QScopedPointer<LocalDiscoveryTracker> _localDiscoveryTracker;
 };
 }
 

@@ -24,8 +24,6 @@ set(libsync_SRCS
     account.cpp
     bandwidthmanager.cpp
     capabilities.cpp
-    clientproxy.cpp
-    connectionvalidator.cpp
     cookiejar.cpp
     discoveryphase.cpp
     filesystem.cpp
@@ -49,6 +47,7 @@ set(libsync_SRCS
     syncfileitem.cpp
     syncfilestatus.cpp
     syncfilestatustracker.cpp
+    localdiscoverytracker.cpp
     syncresult.cpp
     theme.cpp
     creds/dummycredentials.cpp

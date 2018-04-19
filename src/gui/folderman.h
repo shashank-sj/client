@@ -77,8 +77,13 @@ public:
     /** Removes a folder */
     void removeFolder(Folder *);
 
-    /** Returns the folder which the file or directory stored in path is in */
-    Folder *folderForPath(const QString &path);
+    /**
+     * Returns the folder which the file or directory stored in path is in
+     *
+     * Optionally, the path relative to the found folder is returned in
+     * relativePath.
+     */
+    Folder *folderForPath(const QString &path, QString *relativePath = nullptr);
 
     /**
       * returns a list of local files that exist on the local harddisk for an
@@ -106,9 +111,12 @@ public:
     /** Creates a new and empty local directory. */
     bool startFromScratch(const QString &);
 
-    QString statusToString(SyncResult::Status, bool paused) const;
+    /// Produce text for use in the tray tooltip
+    static QString trayTooltipStatusString(SyncResult::Status syncStatus, bool hasUnresolvedConflicts, bool paused);
 
-    static SyncResult accountStatus(const QList<Folder *> &folders);
+    /// Compute status summarizing multiple folders
+    static void trayOverallStatus(const QList<Folder *> &folders,
+        SyncResult::Status *status, bool *unresolvedConflicts);
 
     // Escaping of the alias which is used in QSettings AND the file
     // system, thus need to be escaped.

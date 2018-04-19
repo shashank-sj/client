@@ -33,6 +33,23 @@ If you want to contact us, e.g. before starting a more complex feature,
 you can join us at
 [#nextcloud-dev](irc://irc.freenode.net/#nextcloud-dev).
 
+## Maintainers and Contributors
+
+The current maintainers of this repository are:
+
+* Markus Goetz <guruz@owncloud.com>
+* Olivier Goffart <ogoffart@owncloud.com>
+* Christian Kamm <mail@ckamm.de>
+
+ownCloud Desktop Client is developed by the ownCloud community and [receives
+patches from a variety of authors](https://github.com/owncloud/client/graphs/contributors).
+
+Past maintainers:
+
+* Klaas Freitag <freitag@owncloud.com>
+* Daniel Molkentin <daniel@molkentin.de>
+* Andreas Schneider <asn@cryptomilk.org>
+
 ## License
 
     This program is free software; you can redistribute it and/or modify

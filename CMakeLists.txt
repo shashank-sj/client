@@ -191,7 +191,7 @@ if(BUILD_CLIENT)
 endif()
 
 if (NOT DEFINED APPLICATION_ICON_NAME)
-    set(APPLICATION_ICON_NAME ${APPLICATION_SHORTNAME})
+    set(APPLICATION_ICON_NAME "${APPLICATION_SHORTNAME}")
 endif()
 
 include(NextcloudCPack.cmake)
@@ -213,9 +213,6 @@ endif()
 # Handle Translations, pick all client_* files from trans directory.
 file( GLOB TRANS_FILES ${CMAKE_SOURCE_DIR}/translations/client_*.ts)
 set(TRANSLATIONS ${TRANS_FILES})
-
-# Make sure we set this before recursing into child folders.
-set(WITH_TESTING ${UNIT_TESTING})
 
 if(BUILD_CLIENT)
     add_subdirectory(src)

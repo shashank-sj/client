@@ -889,6 +889,10 @@ void DetermineAuthTypeJob::start()
             _resultGet = Shibboleth;
             get->setFollowRedirects(false);
         }
+#else
+        Q_UNUSED(this)
+        Q_UNUSED(get)
+        Q_UNUSED(target)
 #endif
     });
     connect(get, &SimpleNetworkJob::finishedSignal, this, [this]() {

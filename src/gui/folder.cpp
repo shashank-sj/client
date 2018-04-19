@@ -30,6 +30,7 @@
 #include "socketapi.h"
 #include "theme.h"
 #include "filesystem.h"
+#include "localdiscoverytracker.h"
 
 #include "creds/abstractcredentials.h"
 
@@ -107,6 +108,15 @@ Folder::Folder(const FolderDefinition &definition,
     _scheduleSelfTimer.setInterval(SyncEngine::minimumFileAgeForUpload);
     connect(&_scheduleSelfTimer, &QTimer::timeout,
         this, &Folder::slotScheduleThisFolder);
+
+    connect(ProgressDispatcher::instance(), &ProgressDispatcher::folderConflicts,
+        this, &Folder::slotFolderConflicts);
+
+    _localDiscoveryTracker.reset(new LocalDiscoveryTracker);
+    connect(_engine.data(), &SyncEngine::finished,
+        _localDiscoveryTracker.data(), &LocalDiscoveryTracker::slotSyncFinished);
+    connect(_engine.data(), &SyncEngine::itemCompleted,
+        _localDiscoveryTracker.data(), &LocalDiscoveryTracker::slotItemCompleted);
 }
 
 Folder::~Folder()
@@ -119,6 +129,10 @@ void Folder::checkLocalPath()
 {
     const QFileInfo fi(_definition.localPath);
     _canonicalLocalPath = fi.canonicalFilePath();
+#ifdef Q_OS_MAC
+    // Workaround QTBUG-55896  (Should be fixed in Qt 5.8)
+    _canonicalLocalPath = _canonicalLocalPath.normalized(QString::NormalizationForm_C);
+#endif
     if (_canonicalLocalPath.isEmpty()) {
         qCWarning(lcFolder) << "Broken symlink:" << _definition.localPath;
         _canonicalLocalPath = _definition.localPath;
@@ -460,8 +474,7 @@ void Folder::slotWatchedPathChanged(const QString &path)
     // We do this before checking for our own sync-related changes to make
     // extra sure to not miss relevant changes.
     auto relativePathBytes = relativePath.toUtf8();
-    _localDiscoveryPaths.insert(relativePathBytes);
-    qCDebug(lcFolder) << "local discovery: inserted" << relativePath << "due to file watcher";
+    _localDiscoveryTracker->addTouchedPath(relativePathBytes);
 
 // The folder watcher fires a lot of bogus notifications during
 // a sync operation, both for actual user files and the database
@@ -487,11 +500,33 @@ void Folder::slotWatchedPathChanged(const QString &path)
         return; // probably a spurious notification
     }
 
+    warnOnNewExcludedItem(record, relativePath);
+
     emit watchedFileChangedExternally(path);
 
     // Also schedule this folder for a sync, but only after some delay:
     // The sync will not upload files that were changed too recently.
     scheduleThisFolderSoon();
+}
+
+void Folder::downloadPlaceholder(const QString &_relativepath)
+{
+    qCInfo(lcFolder) << "Download placeholder: " << _relativepath;
+    auto relativepath = _relativepath.toUtf8();
+
+    // Set in the database that we should download the file
+    SyncJournalFileRecord record;
+    _journal.getFileRecord(relativepath, &record);
+    if (!record.isValid())
+        return;
+    record._type = ItemTypePlaceholderDownload;
+    _journal.setFileRecord(record);
+
+    // Make sure we go over that file during the discovery
+    _journal.avoidReadFromDbOnNextSync(relativepath);
+
+    // Schedule a sync (Folder man will start the sync in a few ms)
+    slotScheduleThisFolder();
 }
 
 void Folder::saveToSettings() const
@@ -628,35 +663,31 @@ void Folder::startSync(const QStringList &pathList)
     setDirtyNetworkLimits();
     setSyncOptions();
 
-    static qint64 fullLocalDiscoveryInterval = []() {
+    static std::chrono::milliseconds fullLocalDiscoveryInterval = []() {
         auto interval = ConfigFile().fullLocalDiscoveryInterval();
         QByteArray env = qgetenv("OWNCLOUD_FULL_LOCAL_DISCOVERY_INTERVAL");
         if (!env.isEmpty()) {
-            interval = env.toLongLong();
+            interval = std::chrono::milliseconds(env.toLongLong());
         }
         return interval;
     }();
+    bool hasDoneFullLocalDiscovery = _timeSinceLastFullLocalDiscovery.isValid();
+    bool periodicFullLocalDiscoveryNow =
+        fullLocalDiscoveryInterval.count() >= 0 // negative means we don't require periodic full runs
+        && _timeSinceLastFullLocalDiscovery.hasExpired(fullLocalDiscoveryInterval.count());
     if (_folderWatcher && _folderWatcher->isReliable()
-        && _timeSinceLastFullLocalDiscovery.isValid()
-        && (fullLocalDiscoveryInterval < 0
-               || _timeSinceLastFullLocalDiscovery.elapsed() < fullLocalDiscoveryInterval)) {
+        && hasDoneFullLocalDiscovery
+        && !periodicFullLocalDiscoveryNow) {
         qCInfo(lcFolder) << "Allowing local discovery to read from the database";
-        _engine->setLocalDiscoveryOptions(LocalDiscoveryStyle::DatabaseAndFilesystem, _localDiscoveryPaths);
-
-        if (lcFolder().isDebugEnabled()) {
-            QByteArrayList paths;
-            for (auto &path : _localDiscoveryPaths)
-                paths.append(path);
-            qCDebug(lcFolder) << "local discovery paths: " << paths;
-        }
-
-        _previousLocalDiscoveryPaths = std::move(_localDiscoveryPaths);
+        _engine->setLocalDiscoveryOptions(
+            LocalDiscoveryStyle::DatabaseAndFilesystem,
+            _localDiscoveryTracker->localDiscoveryPaths());
+        _localDiscoveryTracker->startSyncPartialDiscovery();
     } else {
         qCInfo(lcFolder) << "Forbidding local discovery to read from the database";
         _engine->setLocalDiscoveryOptions(LocalDiscoveryStyle::FilesystemOnly);
-        _previousLocalDiscoveryPaths.clear();
+        _localDiscoveryTracker->startSyncFullDiscovery();
     }
-    _localDiscoveryPaths.clear();
 
     _engine->setIgnoreHiddenFiles(_definition.ignoreHiddenFiles);
 
@@ -673,6 +704,9 @@ void Folder::setSyncOptions()
     auto newFolderLimit = cfgFile.newBigFolderSizeLimit();
     opt._newBigFolderSizeLimit = newFolderLimit.first ? newFolderLimit.second * 1000LL * 1000LL : -1; // convert from MB to B
     opt._confirmExternalStorage = cfgFile.confirmExternalStorage();
+    opt._moveFilesToTrash = cfgFile.moveToTrash();
+    opt._newFilesArePlaceholders = _definition.usePlaceholders;
+    opt._placeholderSuffix = QStringLiteral(APPLICATION_DOTPLACEHOLDER_SUFFIX);
 
     QByteArray chunkSizeEnv = qgetenv("OWNCLOUD_CHUNK_SIZE");
     if (!chunkSizeEnv.isEmpty()) {
@@ -702,7 +736,7 @@ void Folder::setSyncOptions()
 
     QByteArray targetChunkUploadDurationEnv = qgetenv("OWNCLOUD_TARGET_CHUNK_UPLOAD_DURATION");
     if (!targetChunkUploadDurationEnv.isEmpty()) {
-        opt._targetChunkUploadDuration = targetChunkUploadDurationEnv.toUInt();
+        opt._targetChunkUploadDuration = std::chrono::milliseconds(targetChunkUploadDurationEnv.toUInt());
     } else {
         opt._targetChunkUploadDuration = cfgFile.targetChunkUploadDuration();
     }
@@ -796,23 +830,14 @@ void Folder::slotSyncFinished(bool success)
         journalDb()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList, QStringList());
     }
 
-    // bug: This function uses many different criteria for "sync was successful" - investigate!
     if ((_syncResult.status() == SyncResult::Success
             || _syncResult.status() == SyncResult::Problem)
         && success) {
         if (_engine->lastLocalDiscoveryStyle() == LocalDiscoveryStyle::FilesystemOnly) {
             _timeSinceLastFullLocalDiscovery.start();
         }
-        qCDebug(lcFolder) << "Sync success, forgetting last sync's local discovery path list";
-    } else {
-        // On overall-failure we can't forget about last sync's local discovery
-        // paths yet, reuse them for the next sync again.
-        // C++17: Could use std::set::merge().
-        _localDiscoveryPaths.insert(
-            _previousLocalDiscoveryPaths.begin(), _previousLocalDiscoveryPaths.end());
-        qCDebug(lcFolder) << "Sync failed, keeping last sync's local discovery path list";
     }
-    _previousLocalDiscoveryPaths.clear();
+
 
     emit syncStateChange();
 
@@ -824,7 +849,7 @@ void Folder::slotSyncFinished(bool success)
     // all come in.
     QTimer::singleShot(200, this, &Folder::slotEmitFinishedDelayed);
 
-    _lastSyncDuration = _timeSinceLastSyncStart.elapsed();
+    _lastSyncDuration = std::chrono::milliseconds(_timeSinceLastSyncStart.elapsed());
     _timeSinceLastSyncDone.start();
 
     // Increment the follow-up sync counter if necessary.
@@ -887,25 +912,6 @@ void Folder::slotItemCompleted(const SyncFileItemPtr &item)
             _folderWatcher->removePath(path() + item->_file);
     }
 
-    // Success and failure of sync items adjust what the next sync is
-    // supposed to do.
-    //
-    // For successes, we want to wipe the file from the list to ensure we don't
-    // rediscover it even if this overall sync fails.
-    //
-    // For failures, we want to add the file to the list so the next sync
-    // will be able to retry it.
-    if (item->_status == SyncFileItem::Success
-        || item->_status == SyncFileItem::FileIgnored
-        || item->_status == SyncFileItem::Restoration
-        || item->_status == SyncFileItem::Conflict) {
-        if (_previousLocalDiscoveryPaths.erase(item->_file.toUtf8()))
-            qCDebug(lcFolder) << "local discovery: wiped" << item->_file;
-    } else {
-        _localDiscoveryPaths.insert(item->_file.toUtf8());
-        qCDebug(lcFolder) << "local discovery: inserted" << item->_file << "due to sync failure";
-    }
-
     _syncResult.processCompletedItem(item);
 
     _fileLog->logItem(*item);
@@ -961,6 +967,49 @@ void Folder::slotScheduleThisFolder()
 void Folder::slotNextSyncFullLocalDiscovery()
 {
     _timeSinceLastFullLocalDiscovery.invalidate();
+}
+
+void Folder::slotFolderConflicts(const QString &folder, const QStringList &conflictPaths)
+{
+    if (folder != _definition.alias)
+        return;
+    auto &r = _syncResult;
+
+    // If the number of conflicts is too low, adjust it upwards
+    if (conflictPaths.size() > r.numNewConflictItems() + r.numOldConflictItems())
+        r.setNumOldConflictItems(conflictPaths.size() - r.numNewConflictItems());
+}
+
+void Folder::warnOnNewExcludedItem(const SyncJournalFileRecord &record, const QStringRef &path)
+{
+    // Never warn for items in the database
+    if (record.isValid())
+        return;
+
+    // Don't warn for items that no longer exist.
+    // Note: This assumes we're getting file watcher notifications
+    // for folders only on creation and deletion - if we got a notification
+    // on content change that would create spurious warnings.
+    QFileInfo fi(_canonicalLocalPath + path);
+    if (!fi.exists())
+        return;
+
+    bool ok = false;
+    auto blacklist = _journal.getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, &ok);
+    if (!ok)
+        return;
+    if (!blacklist.contains(path + "/"))
+        return;
+
+    const auto message = fi.isDir()
+        ? tr("The folder %1 was created but was excluded from synchronization previously. "
+             "Data inside it will not be synchronized.")
+              .arg(fi.filePath())
+        : tr("The file %1 was created but was excluded from synchronization previously. "
+             "It will not be synchronized.")
+              .arg(fi.filePath());
+
+    Logger::instance()->postOptionalGuiLog(Theme::instance()->appNameGUI(), message);
 }
 
 void Folder::scheduleThisFolderSoon()
@@ -1052,6 +1101,7 @@ void FolderDefinition::save(QSettings &settings, const FolderDefinition &folder)
     settings.setValue(QLatin1String("targetPath"), folder.targetPath);
     settings.setValue(QLatin1String("paused"), folder.paused);
     settings.setValue(QLatin1String("ignoreHiddenFiles"), folder.ignoreHiddenFiles);
+    settings.setValue(QLatin1String("usePlaceholders"), folder.usePlaceholders);
 
     // Happens only on Windows when the explorer integration is enabled.
     if (!folder.navigationPaneClsid.isNull())
@@ -1072,6 +1122,7 @@ bool FolderDefinition::load(QSettings &settings, const QString &alias,
     folder->paused = settings.value(QLatin1String("paused")).toBool();
     folder->ignoreHiddenFiles = settings.value(QLatin1String("ignoreHiddenFiles"), QVariant(true)).toBool();
     folder->navigationPaneClsid = settings.value(QLatin1String("navigationPaneClsid")).toUuid();
+    folder->usePlaceholders = settings.value(QLatin1String("usePlaceholders")).toBool();
     settings.endGroup();
 
     // Old settings can contain paths with native separators. In the rest of the

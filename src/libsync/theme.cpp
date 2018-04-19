@@ -20,6 +20,8 @@
 #include <QtCore>
 #ifndef TOKEN_AUTH_ONLY
 #include <QtGui>
+#include <QStyle>
+#include <QApplication>
 #endif
 #include <QSslSocket>
 
@@ -105,12 +107,16 @@ QString Theme::version() const
     return MIRALL_VERSION_STRING;
 }
 
+QString Theme::configFileName() const
+{
+    return QStringLiteral(APPLICATION_EXECUTABLE ".cfg");
+}
+
 #ifndef TOKEN_AUTH_ONLY
 
-QIcon Theme::trayFolderIcon(const QString &backend) const
+QIcon Theme::applicationIcon() const
 {
-    Q_UNUSED(backend)
-    return applicationIcon();
+    return themeIcon(QStringLiteral(APPLICATION_ICON_NAME "-icon"));
 }
 
 /*
@@ -127,7 +133,7 @@ QIcon Theme::themeIcon(const QString &name, bool sysTray, bool sysTrayMenuVisibl
     }
 
     QString key = name + "," + flavor;
-    QIcon &cached = _iconCache[key];
+    QIcon &cached = _iconCache[key]; // Take reference, this will also "set" the cache entry
     if (cached.isNull()) {
         if (QIcon::hasThemeIcon(name)) {
             // use from theme
@@ -215,6 +221,11 @@ bool Theme::multiAccount() const
 QString Theme::defaultServerFolder() const
 {
     return QLatin1String("/");
+}
+
+QString Theme::helpUrl() const
+{
+    return QString::fromLatin1("https://doc.owncloud.org/desktop/%1.%2/").arg(MIRALL_VERSION_MAJOR).arg(MIRALL_VERSION_MINOR);
 }
 
 QString Theme::overrideServerUrl() const
@@ -311,21 +322,21 @@ QString Theme::gitSHA1() const
 
 QString Theme::about() const
 {
-    QString re;
-    re = tr("<p>Version %1. For more information please visit <a href='%2'>%3</a>.</p>")
-             .arg(MIRALL_VERSION_STRING)
-             .arg("http://" MIRALL_STRINGIFY(APPLICATION_DOMAIN))
-             .arg(MIRALL_STRINGIFY(APPLICATION_DOMAIN));
+    QString devString;
+    devString = tr("<p>Version %2. For more information visit <a href=\"%3\">https://%4</a></p>"
+                       "<p>For known issues and help, please visit: <a href=\"https://central.owncloud.org/c/desktop-client\">https://central.owncloud.org</a></p>"
+                       "<p><small>By Klaas Freitag, Daniel Molkentin, Olivier Goffart, Markus Götz, "
+                       " Jan-Christoph Borchardt, and others.</small></p>"
+                       "<p>Copyright ownCloud GmbH</p>"
+                       "<p>Licensed under the GNU General Public License (GPL) Version 2.0<br/>"
+                       "ownCloud and the ownCloud Logo are registered trademarks of ownCloud GmbH "
+                       "in the United States, other countries, or both.</p>")
+                    .arg(Utility::escape(MIRALL_VERSION_STRING),
+                        Utility::escape("https://" MIRALL_STRINGIFY(APPLICATION_DOMAIN)),
+                        Utility::escape(MIRALL_STRINGIFY(APPLICATION_DOMAIN)));
 
-    re += tr("<p>Copyright ownCloud GmbH</p>");
-    re += tr("<p>Distributed by %1 and licensed under the GNU General Public License (GPL) Version 2.0.<br/>"
-             "%2 and the %2 logo are registered trademarks of %1 in the "
-             "United States, other countries, or both.</p>")
-              .arg(APPLICATION_VENDOR)
-              .arg(APPLICATION_NAME);
-
-    re += gitSHA1();
-    return re;
+    devString += gitSHA1();
+    return devString;
 }
 
 #ifndef TOKEN_AUTH_ONLY

@@ -37,6 +37,7 @@
 #include <QtCore>
 #include <QMutableSetIterator>
 #include <QSet>
+#include <QNetworkProxy>
 
 namespace OCC {
 
@@ -58,9 +59,9 @@ FolderMan::FolderMan(QObject *parent)
     _socketApi.reset(new SocketApi);
 
     ConfigFile cfg;
-    int polltime = cfg.remotePollInterval();
-    qCInfo(lcFolderMan) << "setting remote poll timer interval to" << polltime << "msec";
-    _etagPollTimer.setInterval(polltime);
+    std::chrono::milliseconds polltime = cfg.remotePollInterval();
+    qCInfo(lcFolderMan) << "setting remote poll timer interval to" << polltime.count() << "msec";
+    _etagPollTimer.setInterval(polltime.count());
     QObject::connect(&_etagPollTimer, &QTimer::timeout, this, &FolderMan::slotEtagPollTimerTimeout);
     _etagPollTimer.start();
 
@@ -652,13 +653,13 @@ void FolderMan::startScheduledSyncSoon()
 
     // Require a pause based on the duration of the last sync run.
     if (Folder *lastFolder = _lastSyncFolder) {
-        msSinceLastSync = lastFolder->msecSinceLastSync();
+        msSinceLastSync = lastFolder->msecSinceLastSync().count();
 
         //  1s   -> 1.5s pause
         // 10s   -> 5s pause
         //  1min -> 12s pause
         //  1h   -> 90s pause
-        qint64 pause = qSqrt(lastFolder->msecLastSyncDuration()) / 20.0 * 1000.0;
+        qint64 pause = qSqrt(lastFolder->msecLastSyncDuration().count()) / 20.0 * 1000.0;
         msDelay = qMax(msDelay, pause);
     }
 
@@ -723,7 +724,7 @@ void FolderMan::slotStartScheduledFolderSync()
 void FolderMan::slotEtagPollTimerTimeout()
 {
     ConfigFile cfg;
-    int polltime = cfg.remotePollInterval();
+    auto polltime = cfg.remotePollInterval();
 
     foreach (Folder *f, _folderMap) {
         if (!f) {
@@ -807,11 +808,10 @@ void FolderMan::slotScheduleFolderByTime()
         auto msecsSinceSync = f->msecSinceLastSync();
 
         // Possibly it's just time for a new sync run
-        bool forceSyncIntervalExpired =
-            quint64(msecsSinceSync) > ConfigFile().forceSyncInterval();
+        bool forceSyncIntervalExpired = msecsSinceSync > ConfigFile().forceSyncInterval();
         if (forceSyncIntervalExpired) {
             qCInfo(lcFolderMan) << "Scheduling folder" << f->alias()
-                                << "because it has been" << msecsSinceSync << "ms "
+                                << "because it has been" << msecsSinceSync.count() << "ms "
                                 << "since the last sync";
 
             scheduleFolder(f);
@@ -822,16 +822,15 @@ void FolderMan::slotScheduleFolderByTime()
         bool syncAgain =
             (f->consecutiveFailingSyncs() > 0 && f->consecutiveFailingSyncs() < 3)
             || f->syncEngine().isAnotherSyncNeeded() == DelayedFollowUp;
-        qint64 syncAgainDelay = 10 * 1000; // 10s for the first retry-after-fail
+        auto syncAgainDelay = std::chrono::seconds(10); // 10s for the first retry-after-fail
         if (f->consecutiveFailingSyncs() > 1)
-            syncAgainDelay = 60 * 1000; // 60s for each further attempt
-        if (syncAgain
-            && msecsSinceSync > syncAgainDelay) {
+            syncAgainDelay = std::chrono::seconds(60); // 60s for each further attempt
+        if (syncAgain && msecsSinceSync > syncAgainDelay) {
             qCInfo(lcFolderMan) << "Scheduling folder" << f->alias()
                                 << ", the last" << f->consecutiveFailingSyncs() << "syncs failed"
                                 << ", anotherSyncNeeded" << f->syncEngine().isAnotherSyncNeeded()
                                 << ", last status:" << f->syncResult().statusString()
-                                << ", time since last sync:" << msecsSinceSync;
+                                << ", time since last sync:" << msecsSinceSync.count();
 
             scheduleFolder(f);
             continue;
@@ -936,7 +935,7 @@ Folder *FolderMan::addFolderInternal(FolderDefinition folderDefinition,
     return folder;
 }
 
-Folder *FolderMan::folderForPath(const QString &path)
+Folder *FolderMan::folderForPath(const QString &path, QString *relativePath)
 {
     QString absolutePath = QDir::cleanPath(path) + QLatin1Char('/');
 
@@ -944,10 +943,16 @@ Folder *FolderMan::folderForPath(const QString &path)
         const QString folderPath = folder->cleanPath() + QLatin1Char('/');
 
         if (absolutePath.startsWith(folderPath, (Utility::isWindows() || Utility::isMac()) ? Qt::CaseInsensitive : Qt::CaseSensitive)) {
+            if (relativePath) {
+                *relativePath = absolutePath.mid(folderPath.length());
+                relativePath->chop(1); // we added a '/' above
+            }
             return folder;
         }
     }
 
+    if (relativePath)
+        relativePath->clear();
     return 0;
 }
 
@@ -1109,9 +1114,11 @@ void FolderMan::setDirtyNetworkLimits()
     }
 }
 
-SyncResult FolderMan::accountStatus(const QList<Folder *> &folders)
+void FolderMan::trayOverallStatus(const QList<Folder *> &folders,
+    SyncResult::Status *status, bool *unresolvedConflicts)
 {
-    SyncResult overallResult;
+    *status = SyncResult::Undefined;
+    *unresolvedConflicts = false;
 
     int cnt = folders.count();
 
@@ -1124,45 +1131,24 @@ SyncResult FolderMan::accountStatus(const QList<Folder *> &folders)
     if (cnt == 1) {
         Folder *folder = folders.at(0);
         if (folder) {
+            auto syncResult = folder->syncResult();
             if (folder->syncPaused()) {
-                overallResult.setStatus(SyncResult::Paused);
+                *status = SyncResult::Paused;
             } else {
-                SyncResult::Status syncStatus = folder->syncResult().status();
-
-
+                SyncResult::Status syncStatus = syncResult.status();
                 switch (syncStatus) {
                 case SyncResult::Undefined:
-                    overallResult.setStatus(SyncResult::Error);
-                    break;
-                case SyncResult::NotYetStarted:
-                    overallResult.setStatus(SyncResult::NotYetStarted);
-                    break;
-                case SyncResult::SyncPrepare:
-                    overallResult.setStatus(SyncResult::SyncPrepare);
-                    break;
-                case SyncResult::SyncRunning:
-                    overallResult.setStatus(SyncResult::SyncRunning);
+                    *status = SyncResult::Error;
                     break;
                 case SyncResult::Problem: // don't show the problem icon in tray.
-                case SyncResult::Success:
-                    if (overallResult.status() == SyncResult::Undefined)
-                        overallResult.setStatus(SyncResult::Success);
+                    *status = SyncResult::Success;
                     break;
-                case SyncResult::Error:
-                    overallResult.setStatus(SyncResult::Error);
-                    break;
-                case SyncResult::SetupError:
-                    if (overallResult.status() != SyncResult::Error)
-                        overallResult.setStatus(SyncResult::SetupError);
-                    break;
-                case SyncResult::SyncAbortRequested:
-                    overallResult.setStatus(SyncResult::SyncAbortRequested);
-                    break;
-                case SyncResult::Paused:
-                    overallResult.setStatus(SyncResult::Paused);
+                default:
+                    *status = syncStatus;
                     break;
                 }
             }
+            *unresolvedConflicts = syncResult.hasUnresolvedConflicts();
         }
     } else {
         int errorsSeen = 0;
@@ -1172,10 +1158,10 @@ SyncResult FolderMan::accountStatus(const QList<Folder *> &folders)
         int various = 0;
 
         foreach (Folder *folder, folders) {
+            SyncResult folderResult = folder->syncResult();
             if (folder->syncPaused()) {
                 abortOrPausedSeen++;
             } else {
-                SyncResult folderResult = folder->syncResult();
                 SyncResult::Status syncStatus = folderResult.status();
 
                 switch (syncStatus) {
@@ -1201,31 +1187,24 @@ SyncResult FolderMan::accountStatus(const QList<Folder *> &folders)
                     // no default case on purpose, check compiler warnings
                 }
             }
+            if (folderResult.hasUnresolvedConflicts())
+                *unresolvedConflicts = true;
         }
-        bool set = false;
         if (errorsSeen > 0) {
-            overallResult.setStatus(SyncResult::Error);
-            set = true;
-        }
-        if (!set && abortOrPausedSeen > 0 && abortOrPausedSeen == cnt) {
+            *status = SyncResult::Error;
+        } else if (abortOrPausedSeen > 0 && abortOrPausedSeen == cnt) {
             // only if all folders are paused
-            overallResult.setStatus(SyncResult::Paused);
-            set = true;
-        }
-        if (!set && runSeen > 0) {
-            overallResult.setStatus(SyncResult::SyncRunning);
-            set = true;
-        }
-        if (!set && goodSeen > 0) {
-            overallResult.setStatus(SyncResult::Success);
-            set = true;
+            *status = SyncResult::Paused;
+        } else if (runSeen > 0) {
+            *status = SyncResult::SyncRunning;
+        } else if (goodSeen > 0) {
+            *status = SyncResult::Success;
         }
     }
-
-    return overallResult;
 }
 
-QString FolderMan::statusToString(SyncResult::Status syncStatus, bool paused) const
+QString FolderMan::trayTooltipStatusString(
+    SyncResult::Status syncStatus, bool hasUnresolvedConflicts, bool paused)
 {
     QString folderMessage;
     switch (syncStatus) {
@@ -1242,12 +1221,14 @@ QString FolderMan::statusToString(SyncResult::Status syncStatus, bool paused) co
         folderMessage = tr("Sync is running.");
         break;
     case SyncResult::Success:
-        folderMessage = tr("Last Sync was successful.");
+    case SyncResult::Problem:
+        if (hasUnresolvedConflicts) {
+            folderMessage = tr("Sync was successful, unresolved conflicts.");
+        } else {
+            folderMessage = tr("Last Sync was successful.");
+        }
         break;
     case SyncResult::Error:
-        break;
-    case SyncResult::Problem:
-        folderMessage = tr("Last Sync was successful, but with warnings on individual files.");
         break;
     case SyncResult::SetupError:
         folderMessage = tr("Setup Error.");

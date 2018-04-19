@@ -18,11 +18,3 @@ Improvements and New Features
 The |version| release of the Nextcloud desktop sync client has many new features and 
 improvements.
  
-  * Show server notifications on the client
-  * Improved sync speed
-  * Improved handling of Win32 file locks and network files 
-  * Improved user notifications about ignored files and conflicts
-  * Add warnings for old server versions
-  * Update of QtKeyChain to support Windows credential store
-  * Packaging of dolphin overlay icon module for bleeding edge distributions
-  

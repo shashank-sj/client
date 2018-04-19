@@ -37,6 +37,7 @@
 #include "updater/ocupdater.h"
 #include "owncloudsetupwizard.h"
 #include "version.h"
+#include "csync_exclude.h"
 
 #include "config.h"
 
@@ -171,6 +172,9 @@ Application::Application(int &argc, char **argv)
     ConfigFile cfg;
     if (!AbstractNetworkJob::httpTimeout)
         AbstractNetworkJob::httpTimeout = cfg.timeout();
+
+    ExcludedFiles::setupPlaceholderExclude(
+        cfg.excludeFile(ConfigFile::UserScope), APPLICATION_DOTPLACEHOLDER_SUFFIX);
 
     _folderManager.reset(new FolderMan);
 
@@ -365,7 +369,9 @@ void Application::slotownCloudWizardDone(int res)
         shouldSetAutoStart = shouldSetAutoStart
             && QCoreApplication::applicationDirPath().startsWith("/Applications/");
 #endif
-        Utility::setLaunchOnStartup(_theme->appName(), _theme->appNameGUI(), shouldSetAutoStart);
+        if (shouldSetAutoStart) {
+            Utility::setLaunchOnStartup(_theme->appName(), _theme->appNameGUI(), true);
+        }
 
         _gui->slotShowSettings();
     }
@@ -374,13 +380,17 @@ void Application::slotownCloudWizardDone(int res)
 void Application::setupLogging()
 {
     // might be called from second instance
-    Logger::instance()->setLogFile(_logFile);
-    Logger::instance()->setLogDir(_logDir);
-    Logger::instance()->setLogExpire(_logExpire);
-    Logger::instance()->setLogFlush(_logFlush);
-    Logger::instance()->setLogDebug(_logDebug);
+    auto logger = Logger::instance();
+    logger->setLogFile(_logFile);
+    logger->setLogDir(_logDir);
+    logger->setLogExpire(_logExpire);
+    logger->setLogFlush(_logFlush);
+    logger->setLogDebug(_logDebug);
+    if (!logger->isLoggingToFile() && ConfigFile().automaticLogDir()) {
+        logger->setupTemporaryFolderLogDir();
+    }
 
-    Logger::instance()->enterNextLogFile();
+    logger->enterNextLogFile();
 
     qCInfo(lcApplication) << QString::fromLatin1("################## %1 locale:[%2] ui_lang:[%3] version:[%4] os:[%5]").arg(_theme->appName()).arg(QLocale::system().name()).arg(property("ui_lang").toString()).arg(_theme->version()).arg(Utility::platformName());
 }
@@ -459,6 +469,9 @@ void Application::parseOptions(const QStringList &options)
             _debugMode = true;
         } else if (option == QLatin1String("--version")) {
             _versionOnly = true;
+        } else if (option.endsWith(QStringLiteral(APPLICATION_DOTPLACEHOLDER_SUFFIX))) {
+            // placeholder file, open it after the Folder were created (if the app is not terminated)
+            QTimer::singleShot(0, this, [this, option] { openPlaceholder(option); });
         } else {
             showHint("Unrecognized option '" + option.toStdString() + "'");
         }
@@ -624,5 +637,29 @@ void Application::showSettingsDialog()
     _gui->slotShowSettings();
 }
 
+void Application::openPlaceholder(const QString &filename)
+{
+    QString placeholderExt = QStringLiteral(APPLICATION_DOTPLACEHOLDER_SUFFIX);
+    if (!filename.endsWith(placeholderExt)) {
+        qWarning(lcApplication) << "Can only handle file ending in .owncloud. Unable to open" << filename;
+        return;
+    }
+    QString relativePath;
+    auto folder = FolderMan::instance()->folderForPath(filename, &relativePath);
+    if (!folder) {
+        qWarning(lcApplication) << "Can't find sync folder for" << filename;
+        // TODO: show a QMessageBox for errors
+        return;
+    }
+    folder->downloadPlaceholder(relativePath);
+    QString normalName = filename.left(filename.size() - placeholderExt.size());
+    auto con = QSharedPointer<QMetaObject::Connection>::create();
+    *con = QObject::connect(folder, &Folder::syncFinished, [con, normalName] {
+        QObject::disconnect(*con);
+        if (QFile::exists(normalName)) {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(normalName));
+        }
+    });
+}
 
 } // namespace OCC
